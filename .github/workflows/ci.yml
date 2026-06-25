@@ -40,6 +40,8 @@ jobs:
         run: pip install checkov && checkov -d iac --quiet --compact || true
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3  # v2.3.6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # required to scan PRs
 
   governance:
     runs-on: ubuntu-latest

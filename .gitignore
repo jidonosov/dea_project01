@@ -1,0 +1,25 @@
+# Secrets — NEVER commit (AGENTS.md §5)
+.env
+.env.*
+*.pem
+*.key
+credentials
+CLAUDE.local.md
+
+# CDK
+cdk.out/
+.cdk.staging/
+cdk.context.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db

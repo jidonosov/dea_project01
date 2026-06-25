@@ -1,0 +1,20 @@
+# CODEOWNERS — enforces AGENTS.md Tier 3 (human review required).
+# A PR touching any path below cannot merge without @jidonosov's review,
+# regardless of CI status. Replace with your GitHub handle if different.
+
+# Infrastructure / cloud handlers (irreversibility + secrets)
+/iac/                       @jidonosov
+/cdk.json                   @jidonosov
+/app.py                     @jidonosov
+
+# Data-transform + quality logic (silent data-quality corruption risk)
+/src/glue/                  @jidonosov
+
+# Dependency manifests (supply chain)
+/requirements*.txt          @jidonosov
+
+# CI/CD, governance, agent config (self-modification conflict of interest)
+/.github/                   @jidonosov
+/.claude/                   @jidonosov
+/AGENTS.md                  @jidonosov
+/CLAUDE.md                  @jidonosov

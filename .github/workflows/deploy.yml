@@ -1,0 +1,40 @@
+name: Deploy
+
+# CD via OIDC short-lived credentials — NO long-lived AWS keys (AGENTS.md §4).
+# Prereq: an IAM role in your account trusting this repo's main branch, scoped to dea-c01-* resources.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "iac/**"
+      - "src/**"
+      - "app.py"
+      - "cdk.json"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # never race the same stack
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write   # required to mint the OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502  # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}   # arn of the scoped OIDC role
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c  # v5.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Deploy
+        run: cdk deploy --all --require-approval never

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}   # least privilege; jobs grant what they need
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+      - uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c  # v5.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Lint
+        run: ruff check .
+      - name: Unit tests
+        run: pytest -q
+      - name: CDK synth (validate IaC)
+        run: cdk synth --quiet || npx --yes aws-cdk synth --quiet
+
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+      - uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c  # v5.0.0
+        with:
+          python-version: "3.12"
+      - name: SAST (Bandit)
+        run: pip install bandit && bandit -r src iac -ll
+      - name: IaC policy scan (Checkov)
+        run: pip install checkov && checkov -d iac --quiet --compact || true
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3  # v2.3.6
+
+  governance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+      - name: Governance files present
+        run: |
+          for f in AGENTS.md CLAUDE.md .github/CODEOWNERS; do
+            test -f "$f" || { echo "Missing required governance file: $f"; exit 1; }
+          done
+          grep -q "Autonomy tiers" AGENTS.md || { echo "AGENTS.md missing tier section"; exit 1; }

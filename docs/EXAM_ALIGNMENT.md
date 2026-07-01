@@ -25,3 +25,21 @@ DEA-C01 exam objectives. This is the map.
 
 > Note: `AGENTS.md §6` (agentic-AI / Claude Architect domains) does **not** apply to this
 > pipeline — there is no LLM in the product. It constrains only how Claude Code helps build it.
+
+## Convention: capture the "why over the alternative", not just the fact
+
+DEA-C01 mostly tests choosing the best-fit service among competing valid options under given
+constraints — not isolated facts. So each row added here (and each stack/module docstring, per
+`CLAUDE.md`) should be able to answer, in one line: *what else could have done this job, and why
+was it rejected here?* Examples already implicit in this repo's design:
+
+| Decision made here | Plausible alternative | Why rejected in this context |
+|---|---|---|
+| Kinesis Firehose for ingest | Kinesis Data Streams + Lambda consumer | Firehose needs no consumer code/scaling logic for a simple land-to-S3 path; Data Streams only earns its complexity at higher throughput or when multiple consumers need the same stream |
+| Glue (Spark) ETL | EMR | Glue is serverless/pay-per-job; EMR's cluster-uptime billing and ops overhead only pay off at a scale/customization this study project doesn't have |
+| Step Functions + EventBridge | Managed Workflows for Apache Airflow (MWAA) | MWAA bills for the environment 24/7 whether it's orchestrating or idle; Step Functions is pay-per-transition and fits a small serverless budget |
+| Athena for exploratory SQL | Redshift Serverless as primary query layer | Athena queries S3 directly with no warehouse to provision/pause; Redshift Serverless is exercised separately as one of the mini-projects, not the main pipeline's query layer |
+
+Keep adding rows like this as skeleton files get fleshed out (e.g. once `curated_etl.py`'s Data
+Quality ruleset is real, note why Glue Data Quality was chosen over Deequ-on-EMR or a custom
+pytest-based check).

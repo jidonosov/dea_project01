@@ -7,6 +7,7 @@ Every resource is tagged project=dea-c01 for cost tracking and least-privilege s
 import aws_cdk as cdk
 
 from iac.stacks.storage_stack import StorageStack
+from iac.stacks.ingestion_stack import IngestionStack
 from iac.stacks.catalog_glue_stack import CatalogGlueStack
 from iac.stacks.orchestration_stack import OrchestrationStack
 from iac.stacks.governance_stack import GovernanceStack
@@ -17,6 +18,15 @@ app = cdk.App()
 env = cdk.Environment()  # resolves from CDK_DEFAULT_ACCOUNT / CDK_DEFAULT_REGION
 
 storage = StorageStack(app, f"{PREFIX}-storage", env=env)
+
+# Ingest: generator Lambda -> Firehose -> raw zone. Depends only on storage (raw bucket + key).
+IngestionStack(
+    app,
+    f"{PREFIX}-ingestion",
+    raw_bucket=storage.raw_bucket,
+    data_key=storage.data_key,
+    env=env,
+)
 
 catalog = CatalogGlueStack(
     app,

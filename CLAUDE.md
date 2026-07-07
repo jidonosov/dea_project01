@@ -79,6 +79,10 @@ must carry that reasoning, not just describe what the code does:
 
 ## What's a skeleton (flesh these out)
 
-- `src/glue/curated_etl.py` — transform body + Data Quality ruleset are TODO stubs.
-- `iac/stacks/governance_stack.py` — Lake Formation grants are documented placeholders.
 - `src/lambda/generator/handler.py` — emits sample records; swap in your real dataset.
+
+Fleshed out (kept here as a map of what's real):
+- `src/glue/curated_etl.py` — transform + Data Quality ruleset are implemented.
+- `iac/stacks/governance_stack.py` — Lake Formation location registration + analyst grants are
+  implemented (pre-crawl table-wildcard SELECT; post-crawl column-masked SELECT). Deploy still
+  needs a Lake Formation data-lake admin designated once (see the stack docstring / README).

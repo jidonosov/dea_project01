@@ -45,13 +45,16 @@ OrchestrationStack(
     env=env,
 )
 
-GovernanceStack(
+governance = GovernanceStack(
     app,
     f"{PREFIX}-governance",
     curated_bucket=storage.curated_bucket,
     database_name=catalog.database_name,
     env=env,
 )
+# The LF grants reference the catalog's database by *name* (a plain string), so CloudFormation
+# can't infer the cross-stack edge — make it explicit so the database exists before we grant on it.
+governance.add_dependency(catalog)
 
 cdk.Tags.of(app).add("project", PREFIX)
 app.synth()

@@ -49,6 +49,8 @@ governance = GovernanceStack(
     app,
     f"{PREFIX}-governance",
     curated_bucket=storage.curated_bucket,
+    data_key=storage.data_key,                      # LF registration role needs kms:Decrypt
+    athena_results_bucket=storage.athena_results_bucket,  # analyst reads/writes query results
     database_name=catalog.database_name,
     env=env,
 )

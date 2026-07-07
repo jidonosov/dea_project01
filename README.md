@@ -37,8 +37,17 @@ build infrastructure.
 cdk bootstrap            # creates a small support stack (assets bucket + deploy roles). Run once.
 ```
 
-The only other manual step is designating a **Lake Formation data-lake admin** in the console
-before fine-grained grants work (see `iac/stacks/governance_stack.py`). Everything else is code.
+Lake Formation needs a few things CDK can't safely automate. Full detail (with the *why*) is in
+the `iac/stacks/governance_stack.py` docstring — the operator summary:
+
+| # | Manual step | When |
+|---|---|---|
+| M1 | Make the deploy role a **Lake Formation data-lake admin** (LF console → Administrative roles). Not automated: `CfnDataLakeSettings.admins` *replaces* the admin list → lockout risk. | Once, **before** the first `cdk deploy` of the governance stack. |
+| M2 | **Uncheck** the "Use only IAM access control" defaults for new databases/tables (LF console → Data Catalog settings). Otherwise LF grants `Super` to `IAMAllowedPrincipals` on new tables and **column masking is silently bypassed**. | Once, **before** the crawler first runs. |
+| M3 | **Revoke** `Super` from `IAMAllowedPrincipals` on the database + curated table, then redeploy governance with `curated_table_name` set (enables the column-masked grant). | **After** the first crawl. |
+
+Everything else — the LF location registration, the data-access role, the analyst's grants and
+baseline query IAM — is code in `governance_stack.py`.
 
 > DEA-C01: this is **Domain 3** (deployment automation). CDK *synthesizes to CloudFormation* —
 > it does not call AWS APIs directly. Infrastructure *definitions* live in code; *runtime state*

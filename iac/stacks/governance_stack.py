@@ -12,22 +12,37 @@ Why Lake Formation over plain IAM / S3 bucket policies (the exam trade-off):
   masking on shared tables is exactly what bucket policies can't express -- that's when LF earns
   its extra setup over the simpler IAM-only model.
 
-Two hard realities this stack encodes (both are common DEA-C01 gotchas):
+LF and IAM are BOTH required, and they answer different questions (internalize this for D4):
+  - IAM  -> "may this principal *call* Athena/Glue APIs and use the KMS key?"
+  - LF   -> "which databases / tables / *columns* may it read?"
+  A query succeeds only when both say yes. So this stack does two things that look redundant but
+  aren't: it issues LF grants (the data layer) AND gives the analyst baseline IAM (the API layer).
 
-  1. Lake Formation is ORDER-SENSITIVE and needs a *data lake admin* before any grant works.
-     Designating that admin is a one-time manual step (console, or CfnDataLakeSettings). We do
-     NOT set CfnDataLakeSettings here on purpose: writing `admins` REPLACES the entire admin
-     list rather than appending, so a bad value can lock every human (and this very deploy role)
-     out of Lake Formation. Prefer the deliberate manual designation documented in the README.
-     PRECONDITION: the identity that runs `cdk deploy` must already be a Lake Formation admin,
-     or the grants below fail at deploy time.
+------------------------------------------------------------------------------------------------
+OPERATOR RUNBOOK -- manual steps CDK cannot safely automate (do these once, per account+region):
 
-  2. Named-table (and therefore column-level) grants require the table to EXIST in the catalog,
-     which only happens after the crawler's first run. Before that, the strongest valid grant is
-     a table *wildcard* on the database. So this stack is two-phase by design:
-       - pre-crawl  (curated_table_name=None): grant SELECT on ALL tables (wildcard).
-       - post-crawl (curated_table_name="<table>"): grant column-level SELECT that EXCLUDES a
-         sensitive column, demonstrating the fine-grained masking that justifies Lake Formation.
+  [M1] Designate the deploy identity as a Lake Formation data-lake ADMIN.
+       WHEN: once, BEFORE the first `cdk deploy` of this stack.
+       HOW:  LF console -> Administrative roles and tasks -> Data lake administrators -> Add
+             (add the OIDC deploy role ARN from .github/workflows/deploy.yml, and yourself).
+       WHY not in code: writing CfnDataLakeSettings.admins REPLACES the whole admin list rather
+             than appending -- a wrong value locks everyone (incl. this deploy role) out of LF.
+
+  [M2] Turn OFF the "Use only IAM access control" defaults for new databases and tables.
+       WHEN: once, BEFORE the crawler first runs.
+       HOW:  LF console -> Data Catalog settings -> uncheck BOTH default-permission checkboxes.
+       WHY:  otherwise LF auto-grants `Super` to the `IAMAllowedPrincipals` group on every new
+             table, which makes the table fall back to pure-IAM control and SILENTLY bypasses
+             the column masking below. Nothing errors -- the analyst just sees `amount` anyway.
+
+  [M3] After the crawler creates the curated table, REVOKE `Super` from `IAMAllowedPrincipals`
+       on the database and the table, then redeploy this stack with `curated_table_name` set.
+       WHEN: after the first crawl, before you rely on masking.
+       HOW:  LF console -> Databases/Tables -> View permissions -> revoke IAMAllowedPrincipals.
+
+  Deploy-role scope (IAM, one-time): the deploy role also needs `lakeformation:RegisterResource`,
+  `lakeformation:GrantPermissions`, and `iam:PassRole` for the registration role created below.
+------------------------------------------------------------------------------------------------
 
 Tier 3 (AGENTS.md): governance/permission changes carry blast-radius risk -> human review.
 """
@@ -36,6 +51,7 @@ from typing import Optional
 from aws_cdk import (
     Stack,
     aws_s3 as s3,
+    aws_kms as kms,
     aws_iam as iam,
     aws_lakeformation as lakeformation,
 )
@@ -53,6 +69,8 @@ class GovernanceStack(Stack):
         construct_id: str,
         *,
         curated_bucket: s3.IBucket,
+        data_key: kms.IKey,
+        athena_results_bucket: s3.IBucket,
         database_name: str,
         curated_table_name: Optional[str] = None,
         **kwargs,
@@ -62,28 +80,88 @@ class GovernanceStack(Stack):
         self.curated_bucket = curated_bucket
         self.database_name = database_name
 
+        # ---- Registration role: how LF reads the KMS-ENCRYPTED curated data on a grantee's behalf.
+        # We register the location with a CUSTOM role instead of use_service_linked_role=True on
+        # purpose. The service-linked role would need permissions on the customer-managed KMS key,
+        # but adding a not-yet-existent SLR to a KMS key policy fails KMS's principal-existence
+        # check -> a deploy-order trap. An explicit role we create and grant is deployable in one
+        # pass and shows the "registration role" concept the exam expects. LF assumes this role
+        # (trust: lakeformation.amazonaws.com) to vend scoped credentials to Athena/Glue at query
+        # time -- which is why analysts never need direct s3:GetObject on the curated bucket.
+        registration_role = iam.Role(
+            self,
+            "LakeFormationDataAccessRole",
+            role_name="dea-c01-lf-data-access",
+            assumed_by=iam.ServicePrincipal("lakeformation.amazonaws.com"),
+            description="LF assumes this to read the KMS-encrypted curated zone for grantees.",
+        )
+        curated_bucket.grant_read(registration_role)
+        data_key.grant_decrypt(registration_role)  # required: curated objects are CMK-encrypted
+
         # 1. Register the curated S3 location with Lake Formation so LF -- not just IAM -- governs
-        #    access to objects under it. use_service_linked_role=True lets LF create/use
-        #    AWSServiceRoleForLakeFormationDataAccess to read the data on a grantee's behalf, so
-        #    Athena queries succeed without handing analysts direct s3:GetObject on the bucket.
+        #    access to objects under it, using the role above to reach the encrypted data.
         curated_location = lakeformation.CfnResource(
             self,
             "CuratedLocation",
             resource_arn=curated_bucket.bucket_arn,
-            use_service_linked_role=True,
+            use_service_linked_role=False,  # we register with our own role instead (above)
+            role_arn=registration_role.role_arn,
         )
 
-        # 2. The analyst persona: a role that gets ONLY Lake Formation grants, no S3/Glue policies.
-        #    That's the whole point -- LF, not an IAM policy, decides what data it can read. In a
-        #    real deployment this would be assumed via SSO/federation; here it's a bare role so the
-        #    grant wiring is the thing on display.
+        # 2. The analyst persona. Its DATA access comes only from LF grants (below), but LF governs
+        #    data, not API calls -- so it still needs baseline IAM to *run a query at all*:
+        #      - athena:*  to submit/read queries
+        #      - glue:Get* to resolve the catalog table (LF DESCRIBE gates the rows this returns)
+        #      - lakeformation:GetDataAccess  so Athena can fetch LF-vended credentials
+        #      - read/write on the Athena RESULTS bucket + its KMS key (results are CMK-encrypted)
+        #    Note: it deliberately has NO curated-bucket S3 access -- LF is the only path to that
+        #    data, which is the whole point.
         self.analyst_role = iam.Role(
             self,
             "AnalystRole",
             role_name="dea-c01-analyst",
             assumed_by=iam.AccountRootPrincipal(),  # study project: assumable within the account
-            description="Least-privilege analyst; data access comes only from Lake Formation grants.",
+            description="Least-privilege analyst; curated data access comes only from LF grants.",
         )
+        self.analyst_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="AthenaQuery",
+                actions=[
+                    "athena:StartQueryExecution",
+                    "athena:StopQueryExecution",
+                    "athena:GetQueryExecution",
+                    "athena:GetQueryResults",
+                    "athena:GetWorkGroup",
+                ],
+                resources=["*"],
+            )
+        )
+        self.analyst_role.add_to_policy(
+            iam.PolicyStatement(
+                sid="CatalogRead",
+                actions=[
+                    "glue:GetDatabase",
+                    "glue:GetDatabases",
+                    "glue:GetTable",
+                    "glue:GetTables",
+                    "glue:GetPartition",
+                    "glue:GetPartitions",
+                ],
+                resources=["*"],
+            )
+        )
+        self.analyst_role.add_to_policy(
+            iam.PolicyStatement(
+                # Athena calls this to exchange the LF grant for temporary data credentials.
+                sid="LakeFormationCredentialVending",
+                actions=["lakeformation:GetDataAccess"],
+                resources=["*"],
+            )
+        )
+        # Athena writes query output to the results bucket (CMK-encrypted), then reads it back.
+        athena_results_bucket.grant_read_write(self.analyst_role)
+        data_key.grant_encrypt_decrypt(self.analyst_role)  # for those encrypted results only
+
         analyst_principal = lakeformation.CfnPermissions.DataLakePrincipalProperty(
             data_lake_principal_identifier=self.analyst_role.role_arn
         )
@@ -103,7 +181,7 @@ class GovernanceStack(Stack):
             permissions=["DESCRIBE"],
         )
 
-        # 3b. SELECT on the data. Two-phase (see module docstring):
+        # 3b. SELECT on the data. Two-phase (see the runbook: named grants need the table to exist):
         if curated_table_name is None:
             # Pre-crawl: no named table exists yet, so grant SELECT on ALL tables (wildcard).
             # Coarse but valid -- the strongest grant possible before the catalog is populated.
@@ -124,7 +202,8 @@ class GovernanceStack(Stack):
         else:
             # Post-crawl: the fine-grained showcase. Grant SELECT on the named table but EXCLUDE
             # the sensitive column -- Athena will transparently hide `amount` from this analyst.
-            # This column-level masking is what a bucket policy fundamentally cannot do.
+            # This column-level masking is what a bucket policy fundamentally cannot do. (Only
+            # takes effect once IAMAllowedPrincipals has been removed from the table -- see [M3].)
             select_grant = lakeformation.CfnPermissions(
                 self,
                 "AnalystSelectMaskedColumns",

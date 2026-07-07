@@ -39,6 +39,7 @@ was it rejected here?* Examples already implicit in this repo's design:
 | Glue (Spark) ETL | EMR | Glue is serverless/pay-per-job; EMR's cluster-uptime billing and ops overhead only pay off at a scale/customization this study project doesn't have |
 | Step Functions + EventBridge | Managed Workflows for Apache Airflow (MWAA) | MWAA bills for the environment 24/7 whether it's orchestrating or idle; Step Functions is pay-per-transition and fits a small serverless budget |
 | Athena for exploratory SQL | Redshift Serverless as primary query layer | Athena queries S3 directly with no warehouse to provision/pause; Redshift Serverless is exercised separately as one of the mini-projects, not the main pipeline's query layer |
+| Lake Formation column-level grants | IAM / S3 bucket-prefix policies | A bucket policy is all-or-nothing on a *path* — it can't hide one column (e.g. `amount`) from an analyst who may read the rest of the table; Lake Formation grants SELECT down to the column/row/cell and Athena enforces it. The cost is LF's order-sensitivity (needs a data-lake admin; named grants need the table to exist) — see `iac/stacks/governance_stack.py` |
 
 Keep adding rows like this as skeleton files get fleshed out (e.g. once `curated_etl.py`'s Data
 Quality ruleset is real, note why Glue Data Quality was chosen over Deequ-on-EMR or a custom

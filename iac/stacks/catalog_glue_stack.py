@@ -117,9 +117,16 @@ class CatalogGlueStack(Stack):
         # Lake Formation grant so the crawler role can write tables into the LF-governed database.
         # Needed only because the account's IAM-only default was disabled (see module docstring);
         # with the default on, IAMAllowedPrincipals would cover this and the grant would be moot.
-        #   - Database: CREATE_TABLE so the crawler can add tables; DESCRIBE/ALTER so re-crawls can
-        #     see and evolve the database. (The crawler owns the tables it creates, but ALTER on
-        #     the table wildcard lets it update schemas of tables from a previous run.)
+        #
+        # ONE database-level grant is enough -- deliberately no separate table grant:
+        #   - CREATE_TABLE lets the crawler add tables. A principal that CREATES a Data Catalog
+        #     resource is implicitly granted ALL Lake Formation permissions on it (with grant
+        #     option), so the crawler already owns -- and can ALTER/DROP on re-crawl -- every table
+        #     it makes. An explicit table-wildcard grant would be redundant.
+        #   - It would also actively break the deploy: the legacy AWS::LakeFormation::Permissions
+        #     CloudFormation resource fails on `TableWildcard` with a spurious "Resource does not
+        #     exist or requester is not authorized" AccessDenied (the GrantPermissions *API* accepts
+        #     the identical grant fine -- it's a CFN-resource defect). So we avoid table wildcards.
         # The deploy identity must be a Lake Formation admin for this grant to apply (runbook M1).
         glue_db_grant = lakeformation.CfnPermissions(
             self,
@@ -135,24 +142,7 @@ class CatalogGlueStack(Stack):
             ),
             permissions=["CREATE_TABLE", "ALTER", "DESCRIBE"],
         )
-        glue_table_grant = lakeformation.CfnPermissions(
-            self,
-            "GlueRoleTableGrant",
-            data_lake_principal=lakeformation.CfnPermissions.DataLakePrincipalProperty(
-                data_lake_principal_identifier=role.role_arn
-            ),
-            resource=lakeformation.CfnPermissions.ResourceProperty(
-                table_resource=lakeformation.CfnPermissions.TableResourceProperty(
-                    catalog_id=self.account,
-                    database_name=self.database_name,
-                    table_wildcard={},  # tables don't exist yet -> grant on all (present + future)
-                )
-            ),
-            permissions=["ALTER", "DESCRIBE", "DROP", "INSERT", "SELECT"],
-        )
-        # Grants reference the database by name; make the ordering on its creation explicit.
-        glue_db_grant.add_dependency(db)
-        glue_table_grant.add_dependency(db)
+        glue_db_grant.add_dependency(db)  # grant references the database by name
 
         self.etl_job_name = etl_job.name
         self.crawler_name = crawler.ref

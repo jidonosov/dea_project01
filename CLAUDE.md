@@ -90,5 +90,5 @@ Fleshed out (kept here as a map of what's real):
 - `iac/stacks/catalog_glue_stack.py` — raw **and** curated crawlers + the Glue role's Lake
   Formation grants (needed once the IAM-only default is off).
 - `iac/stacks/governance_stack.py` — Lake Formation location registration + analyst grants are
-  implemented (pre-crawl table-wildcard SELECT; post-crawl column-masked SELECT). Deploy still
+  implemented (pre-crawl DESCRIBE-only; post-crawl column-masked SELECT on the named table). Deploy still
   needs a Lake Formation data-lake admin designated once (see the stack docstring / README).

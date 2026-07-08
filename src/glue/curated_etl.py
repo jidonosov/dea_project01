@@ -12,7 +12,8 @@ Design split (kept deliberately, per CLAUDE.md's educational-intent convention):
   failing rule points at a real data problem, not at transform logic quietly papering over it.
 
 Input schema (from the generator Lambda -> Firehose raw JSON):
-  id: string (uuid) · event_time: string (ISO-8601) · amount: double · category: string
+  order_id: string (uuid) · event_time: string (ISO-8601) · customer_id: string · category: string
+  quantity: int · unit_price: double · amount: double (order total) · currency/country/payment_method
 """
 import sys
 
@@ -44,20 +45,22 @@ def transform(df):
 
     return (
         df
-        # No id or no event_time -> the row can't be keyed or partitioned. Drop it.
-        .where(F.col("id").isNotNull() & F.col("event_time").isNotNull())
-        # Firehose delivery is at-least-once, so the raw zone may contain duplicate ids.
-        # Dedup (keep the earliest event per id) makes the curated write idempotent: a
+        # No order_id or no event_time -> the row can't be keyed or partitioned. Drop it.
+        .where(F.col("order_id").isNotNull() & F.col("event_time").isNotNull())
+        # Firehose delivery is at-least-once, so the raw zone may contain duplicate order_ids.
+        # Dedup (keep the earliest event per order_id) makes the curated write idempotent: a
         # re-run over the same raw data won't double-count. This is the DEA-C01 answer to
         # "how do you get exactly-once semantics on top of at-least-once ingestion".
         .withColumn(
             "_rn",
-            F.row_number().over(Window.partitionBy("id").orderBy(F.col("event_time").asc())),
+            F.row_number().over(Window.partitionBy("order_id").orderBy(F.col("event_time").asc())),
         )
         .where(F.col("_rn") == 1)
         .drop("_rn")
         # Type + value normalization only (no validation here -- that's the DQ ruleset).
         .withColumn("amount", F.col("amount").cast("double"))
+        .withColumn("unit_price", F.col("unit_price").cast("double"))
+        .withColumn("quantity", F.col("quantity").cast("int"))
         .withColumn("category", F.lower(F.trim(F.col("category"))))
         # Partition columns for the curated Parquet layout. Integer y/m/d so Athena can
         # partition-prune with plain numeric predicates (see analysis/exploratory.sql).
@@ -71,11 +74,12 @@ def transform(df):
 # guarantee or that the source promises -- so a failure is a genuine data problem.
 DATA_QUALITY_RULESET = """
 Rules = [
-    IsComplete "id",
-    IsUnique "id",
+    IsComplete "order_id",
+    IsUnique "order_id",
     IsComplete "event_time",
     ColumnValues "amount" >= 0,
-    ColumnValues "category" in ["a", "b", "c"],
+    ColumnValues "quantity" > 0,
+    ColumnValues "category" in ["electronics", "books", "grocery", "clothing", "home"],
     RowCount > 0
 ]
 """

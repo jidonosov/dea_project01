@@ -79,10 +79,16 @@ must carry that reasoning, not just describe what the code does:
 
 ## What's a skeleton (flesh these out)
 
-- `src/lambda/generator/handler.py` — emits sample records; swap in your real dataset.
+_None — the pipeline is fully fleshed out. Map of what's real below._
 
 Fleshed out (kept here as a map of what's real):
-- `src/glue/curated_etl.py` — transform + Data Quality ruleset are implemented.
+- `src/lambda/generator/handler.py` — realistic-synthetic **e-commerce order** generator. Always
+  injects at-least-once duplicates + null keys (transform cleans them); opt-in `INJECT_DQ_VIOLATIONS`
+  (env or event) plants rows that fail the Data Quality gate to demo it blocking a bad load.
+- `src/glue/curated_etl.py` — transform + Data Quality ruleset are implemented (enriched schema:
+  `order_id`, `event_time`, `customer_id`, `category`, `quantity`, `unit_price`, `amount`, …).
+- `iac/stacks/catalog_glue_stack.py` — raw **and** curated crawlers + the Glue role's Lake
+  Formation grants (needed once the IAM-only default is off).
 - `iac/stacks/governance_stack.py` — Lake Formation location registration + analyst grants are
   implemented (pre-crawl table-wildcard SELECT; post-crawl column-masked SELECT). Deploy still
   needs a Lake Formation data-lake admin designated once (see the stack docstring / README).

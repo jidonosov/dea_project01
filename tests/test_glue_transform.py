@@ -12,33 +12,37 @@ def _spark():
     return SparkSession.builder.master("local[1]").appName("test").getOrCreate()
 
 
+_COLS = ["order_id", "event_time", "customer_id", "category", "quantity", "unit_price", "amount"]
+
+
 def test_transform_cleans_dedups_and_partitions():
     from src.glue.curated_etl import transform
 
     spark = _spark()
     # event_time is a string on purpose: exercises the ISO-8601 -> timestamp cast path.
     rows = [
-        ("1", "2026-06-25T10:00:00", 10.0, "A"),    # valid; earliest event for id 1
-        ("1", "2026-06-25T12:00:00", 99.0, "a"),    # duplicate id -> dropped (later event)
-        (None, "2026-06-25T11:00:00", 5.0, "b"),    # null id -> dropped
-        ("2", "2026-06-26T09:00:00", 7.5, " c "),   # valid; category needs trim/lower
+        # order_id, event_time, customer_id, category, quantity, unit_price, amount
+        ("1", "2026-06-25T10:00:00", "c1", "Electronics", 2, 5.0, 10.0),   # earliest for order 1
+        ("1", "2026-06-25T12:00:00", "c1", "electronics", 2, 5.0, 99.0),   # dup order_id -> dropped
+        (None, "2026-06-25T11:00:00", "c2", "books", 1, 5.0, 5.0),         # null order_id -> dropped
+        ("2", "2026-06-26T09:00:00", "c3", " grocery ", 3, 2.5, 7.5),      # category needs trim/lower
     ]
-    df = spark.createDataFrame(rows, ["id", "event_time", "amount", "category"])
+    df = spark.createDataFrame(rows, _COLS)
 
     out = transform(df)
-    got = {r["id"]: r for r in out.orderBy("id").collect()}
+    got = {r["order_id"]: r for r in out.orderBy("order_id").collect()}
     spark.stop()
 
-    # null id + duplicate id removed
+    # null order_id + duplicate order_id removed
     assert set(got) == {"1", "2"}
     # partition columns present and derived from event_time (not the raw path)
     assert {"year", "month", "day"}.issubset(out.columns)
     assert (got["1"]["year"], got["1"]["month"], got["1"]["day"]) == (2026, 6, 25)
-    # dedup kept the EARLIEST event for id 1 (amount 10.0, not the later 99.0)
+    # dedup kept the EARLIEST event for order 1 (amount 10.0, not the later 99.0)
     assert got["1"]["amount"] == 10.0
     # category normalized (lowercased + trimmed)
-    assert got["1"]["category"] == "a"
-    assert got["2"]["category"] == "c"
+    assert got["1"]["category"] == "electronics"
+    assert got["2"]["category"] == "grocery"
 
 
 def test_transform_is_idempotent_on_already_typed_timestamp():
@@ -49,8 +53,8 @@ def test_transform_is_idempotent_on_already_typed_timestamp():
 
     spark = _spark()
     df = spark.createDataFrame(
-        [("1", "2026-06-25T10:00:00", 10.0, "a")],
-        ["id", "event_time", "amount", "category"],
+        [("1", "2026-06-25T10:00:00", "c1", "electronics", 2, 5.0, 10.0)],
+        _COLS,
     ).withColumn("event_time", F.to_timestamp("event_time"))
 
     out = transform(df).collect()

@@ -52,6 +52,7 @@ governance = GovernanceStack(
     data_key=storage.data_key,                      # LF registration role needs kms:Decrypt
     athena_results_bucket=storage.athena_results_bucket,  # analyst reads/writes query results
     database_name=catalog.database_name,
+    glue_role_arn=catalog.glue_role_arn,            # curated crawler needs DATA_LOCATION_ACCESS
     env=env,
 )
 # The LF grants reference the catalog's database by *name* (a plain string), so CloudFormation

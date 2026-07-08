@@ -93,6 +93,27 @@ class CatalogGlueStack(Stack):
         )
         crawler.add_dependency(db)
 
+        # Curated crawler: catalogs the ETL's partitioned Parquet output so Athena has a *governed*
+        # table to query. This is the table the analyst actually reads (governance_stack.py registers
+        # the curated location with Lake Formation and column-masks this table). Without it, curated
+        # exists only as S3 files with no catalog entry -- nothing to SELECT and nothing to mask.
+        #
+        # It reads the same Parquet the ETL writes (partitioned year=/month=/day=), so the crawler
+        # picks up y/m/d as partition keys automatically -- no manual partition management.
+        # NOTE: run it AFTER the ETL has written curated data (see the runbook), or it finds nothing.
+        curated_crawler = glue.CfnCrawler(
+            self,
+            "CuratedCrawler",
+            role=role.role_arn,
+            database_name=self.database_name,
+            targets=glue.CfnCrawler.TargetsProperty(
+                s3_targets=[
+                    glue.CfnCrawler.S3TargetProperty(path=f"s3://{curated_bucket.bucket_name}/")
+                ]
+            ),
+        )
+        curated_crawler.add_dependency(db)
+
         # Lake Formation grant so the crawler role can write tables into the LF-governed database.
         # Needed only because the account's IAM-only default was disabled (see module docstring);
         # with the default on, IAMAllowedPrincipals would cover this and the grant would be moot.
@@ -135,3 +156,7 @@ class CatalogGlueStack(Stack):
 
         self.etl_job_name = etl_job.name
         self.crawler_name = crawler.ref
+        self.curated_crawler_name = curated_crawler.ref
+        # Exposed so the governance stack can grant this role DATA_LOCATION_ACCESS on the (LF-
+        # registered) curated location -- required for the curated crawler to create a table there.
+        self.glue_role_arn = role.role_arn

@@ -72,6 +72,7 @@ class GovernanceStack(Stack):
         data_key: kms.IKey,
         athena_results_bucket: s3.IBucket,
         database_name: str,
+        glue_role_arn: str,
         curated_table_name: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -107,6 +108,27 @@ class GovernanceStack(Stack):
             use_service_linked_role=False,  # we register with our own role instead (above)
             role_arn=registration_role.role_arn,
         )
+
+        # Once a location is LF-registered, creating a catalog table that POINTS at it requires the
+        # creating principal to hold DATA_LOCATION_ACCESS on that location -- a separate permission
+        # from the database CREATE_TABLE grant in catalog_glue_stack.py. Grant it to the Glue role
+        # so the curated crawler can register its table over the curated zone. (The analyst does NOT
+        # need this: DATA_LOCATION_ACCESS gates *writing metadata* on a location, not SELECT.)
+        glue_location_access = lakeformation.CfnPermissions(
+            self,
+            "GlueCuratedLocationAccess",
+            data_lake_principal=lakeformation.CfnPermissions.DataLakePrincipalProperty(
+                data_lake_principal_identifier=glue_role_arn
+            ),
+            resource=lakeformation.CfnPermissions.ResourceProperty(
+                data_location_resource=lakeformation.CfnPermissions.DataLocationResourceProperty(
+                    catalog_id=self.account,
+                    s3_resource=curated_bucket.bucket_arn,
+                )
+            ),
+            permissions=["DATA_LOCATION_ACCESS"],
+        )
+        glue_location_access.add_dependency(curated_location)
 
         # 2. The analyst persona. Its DATA access comes only from LF grants (below), but LF governs
         #    data, not API calls -- so it still needs baseline IAM to *run a query at all*:

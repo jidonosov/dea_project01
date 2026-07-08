@@ -49,10 +49,14 @@ governance = GovernanceStack(
     app,
     f"{PREFIX}-governance",
     curated_bucket=storage.curated_bucket,
-    data_key=storage.data_key,                      # LF registration role needs kms:Decrypt
+    data_key=storage.data_key,                      # analyst reads/writes KMS-encrypted results
     athena_results_bucket=storage.athena_results_bucket,  # analyst reads/writes query results
     database_name=catalog.database_name,
     glue_role_arn=catalog.glue_role_arn,            # curated crawler needs DATA_LOCATION_ACCESS
+    # Two-phase (runbook): unset pre-crawl (analyst gets DESCRIBE only); after the curated crawler
+    # creates the table, pass its name to switch on the column-masked SELECT:
+    #   cdk deploy dea-c01-governance -c curated_table=<name>
+    curated_table_name=app.node.try_get_context("curated_table"),
     env=env,
 )
 # The LF grants reference the catalog's database by *name* (a plain string), so CloudFormation

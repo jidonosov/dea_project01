@@ -58,7 +58,9 @@ from aws_cdk import (
 from constructs import Construct
 
 # Column the analyst persona is NOT allowed to see, to make column-level masking concrete.
-# (Curated schema: id, event_time, amount, category -- see src/glue/curated_etl.py.)
+# `amount` is the order total (revenue) -- a believable "analysts see orders, not revenue" case.
+# (Curated schema: order_id, event_time, customer_id, category, quantity, unit_price, amount, ...
+#  -- see src/glue/curated_etl.py.)
 _SENSITIVE_COLUMN = "amount"
 
 

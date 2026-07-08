@@ -21,10 +21,17 @@ LF and IAM are BOTH required, and they answer different questions (internalize t
 ------------------------------------------------------------------------------------------------
 OPERATOR RUNBOOK -- manual steps CDK cannot safely automate (do these once, per account+region):
 
-  [M1] Designate the deploy identity as a Lake Formation data-lake ADMIN.
+  [M1] Designate the CDK CLOUDFORMATION EXECUTION ROLE as a Lake Formation data-lake ADMIN
+       (and your own admin identity, for console work).
        WHEN: once, BEFORE the first `cdk deploy` of this stack.
        HOW:  LF console -> Administrative roles and tasks -> Data lake administrators -> Add
-             (add the OIDC deploy role ARN from .github/workflows/deploy.yml, and yourself).
+             both `cdk-hnb659fds-cfn-exec-role-<acct>-<region>` and your admin user/role.
+       WHY the exec role specifically: `cdk deploy` does NOT call CloudFormation as your CLI
+             identity -- it assumes the bootstrap execution role, and THAT role is what issues the
+             LF grants in this stack. If it isn't an LF admin, grants on resources it didn't create
+             (e.g. DATA_LOCATION_ACCESS on an out-of-band-registered location, or SELECT on a
+             crawler-made table) fail with "requester is not authorized". Database grants happen to
+             work without it only because the exec role creates the database and thus owns it.
        WHY not in code: writing CfnDataLakeSettings.admins REPLACES the whole admin list rather
              than appending -- a wrong value locks everyone (incl. this deploy role) out of LF.
 
@@ -35,13 +42,27 @@ OPERATOR RUNBOOK -- manual steps CDK cannot safely automate (do these once, per 
              table, which makes the table fall back to pure-IAM control and SILENTLY bypasses
              the column masking below. Nothing errors -- the analyst just sees `amount` anyway.
 
+  [M-reg] Register the curated S3 location with Lake Formation, using the service-linked role,
+       and grant that SLR kms:Decrypt on the curated CMK so it can read the encrypted data.
+       WHEN: once, AFTER storage is deployed (bucket + key exist), BEFORE deploying this stack.
+       HOW:  aws lakeformation register-resource --resource-arn arn:aws:s3:::<curated-bucket> \
+                 --use-service-linked-role
+             aws kms create-grant --key-id <curated-cmk> \
+                 --grantee-principal arn:aws:iam::<acct>:role/aws-service-role/\
+lakeformation.amazonaws.com/AWSServiceRoleForLakeFormationDataAccess \
+                 --operations Decrypt
+       WHY not in code: (1) a CfnResource registration and the DATA_LOCATION_ACCESS grant below
+             race -- LF needs seconds to propagate a new registration and CFN can't wait between
+             resources; (2) granting the SLR KMS from this stack would make the storage stack
+             (owner of the key) depend on this one -> a cross-stack cycle. Out of band avoids both.
+
   [M3] After the crawler creates the curated table, REVOKE `Super` from `IAMAllowedPrincipals`
        on the database and the table, then redeploy this stack with `curated_table_name` set.
        WHEN: after the first crawl, before you rely on masking.
        HOW:  LF console -> Databases/Tables -> View permissions -> revoke IAMAllowedPrincipals.
 
-  Deploy-role scope (IAM, one-time): the deploy role also needs `lakeformation:RegisterResource`,
-  `lakeformation:GrantPermissions`, and `iam:PassRole` for the registration role created below.
+  Deploy-role scope (IAM, one-time): the deploy role also needs `lakeformation:GrantPermissions`
+  (to issue the grants below). Registration itself is [M-reg], done out of band.
 ------------------------------------------------------------------------------------------------
 
 Tier 3 (AGENTS.md): governance/permission changes carry blast-radius risk -> human review.
@@ -83,33 +104,18 @@ class GovernanceStack(Stack):
         self.curated_bucket = curated_bucket
         self.database_name = database_name
 
-        # ---- Registration role: how LF reads the KMS-ENCRYPTED curated data on a grantee's behalf.
-        # We register the location with a CUSTOM role instead of use_service_linked_role=True on
-        # purpose. The service-linked role would need permissions on the customer-managed KMS key,
-        # but adding a not-yet-existent SLR to a KMS key policy fails KMS's principal-existence
-        # check -> a deploy-order trap. An explicit role we create and grant is deployable in one
-        # pass and shows the "registration role" concept the exam expects. LF assumes this role
-        # (trust: lakeformation.amazonaws.com) to vend scoped credentials to Athena/Glue at query
-        # time -- which is why analysts never need direct s3:GetObject on the curated bucket.
-        registration_role = iam.Role(
-            self,
-            "LakeFormationDataAccessRole",
-            role_name="dea-c01-lf-data-access",
-            assumed_by=iam.ServicePrincipal("lakeformation.amazonaws.com"),
-            description="LF assumes this to read the KMS-encrypted curated zone for grantees.",
-        )
-        curated_bucket.grant_read(registration_role)
-        data_key.grant_decrypt(registration_role)  # required: curated objects are CMK-encrypted
-
-        # 1. Register the curated S3 location with Lake Formation so LF -- not just IAM -- governs
-        #    access to objects under it, using the role above to reach the encrypted data.
-        curated_location = lakeformation.CfnResource(
-            self,
-            "CuratedLocation",
-            resource_arn=curated_bucket.bucket_arn,
-            use_service_linked_role=False,  # we register with our own role instead (above)
-            role_arn=registration_role.role_arn,
-        )
+        # ---- Location registration is done OUT OF BAND (runbook [M-reg]), NOT here. Two reasons:
+        #  1. Register -> grant race: CloudFormation fires the DATA_LOCATION_ACCESS grant below
+        #     within ~1s of a CfnResource registration completing, but Lake Formation needs a few
+        #     seconds to propagate a new registration -> the grant intermittently fails with a
+        #     spurious AccessDenied. There is no CFN-native way to wait between the two.
+        #  2. Registering with the LF service-linked role (which then reads the KMS-encrypted
+        #     curated data for grantees) means the SLR needs kms:Decrypt on the curated CMK. Adding
+        #     that to the key policy from THIS stack would make the storage stack (which owns the
+        #     key) depend on this one -> a cross-stack cycle. Doing it out of band avoids both.
+        # So [M-reg] (see docstring) registers the curated bucket with the SLR and grants the SLR
+        # kms:Decrypt via a KMS grant. Everything below just references the already-registered
+        # location, so no race and no cycle.
 
         # Once a location is LF-registered, creating a catalog table that POINTS at it requires the
         # creating principal to hold DATA_LOCATION_ACCESS on that location -- a separate permission
@@ -130,7 +136,6 @@ class GovernanceStack(Stack):
             ),
             permissions=["DATA_LOCATION_ACCESS"],
         )
-        glue_location_access.add_dependency(curated_location)
 
         # 2. The analyst persona. Its DATA access comes only from LF grants (below), but LF governs
         #    data, not API calls -- so it still needs baseline IAM to *run a query at all*:
@@ -205,29 +210,21 @@ class GovernanceStack(Stack):
             permissions=["DESCRIBE"],
         )
 
-        # 3b. SELECT on the data. Two-phase (see the runbook: named grants need the table to exist):
-        if curated_table_name is None:
-            # Pre-crawl: no named table exists yet, so grant SELECT on ALL tables (wildcard).
-            # Coarse but valid -- the strongest grant possible before the catalog is populated.
-            table_resource = lakeformation.CfnPermissions.TableResourceProperty(
-                catalog_id=self.account,
-                database_name=database_name,
-                table_wildcard={},  # {} == "every table in this database"
-            )
-            select_grant = lakeformation.CfnPermissions(
-                self,
-                "AnalystSelectAllTables",
-                data_lake_principal=analyst_principal,
-                resource=lakeformation.CfnPermissions.ResourceProperty(
-                    table_resource=table_resource
-                ),
-                permissions=["SELECT"],
-            )
-        else:
-            # Post-crawl: the fine-grained showcase. Grant SELECT on the named table but EXCLUDE
-            # the sensitive column -- Athena will transparently hide `amount` from this analyst.
-            # This column-level masking is what a bucket policy fundamentally cannot do. (Only
-            # takes effect once IAMAllowedPrincipals has been removed from the table -- see [M3].)
+        # 3b. SELECT on the data. Two-phase (named grants need the table to exist -- see runbook):
+        #   - pre-crawl (curated_table_name=None): NO table grant. The analyst can see the database
+        #     (DESCRIBE above) but there is no curated table yet, so there is nothing to read. We
+        #     deliberately do NOT grant a table-WILDCARD SELECT here: it would be broader than least
+        #     privilege, and the legacy AWS::LakeFormation::Permissions CloudFormation resource
+        #     fails on `TableWildcard` with a spurious AccessDenied (a CFN-resource defect -- the
+        #     GrantPermissions API accepts the same grant). The masked grant below is the showcase.
+        #   - post-crawl (curated_table_name set): column-masked SELECT on the named curated table.
+        select_grant = None
+        if curated_table_name is not None:
+            # The fine-grained showcase. Grant SELECT on the named table but EXCLUDE the sensitive
+            # column -- Athena transparently hides `amount` from this analyst. This column-level
+            # masking is what a bucket policy fundamentally cannot do. (Only takes effect once
+            # IAMAllowedPrincipals has been removed from the table -- see [M3].) A named table +
+            # ColumnWildcard works with the legacy CFN resource; only *table* wildcards are broken.
             select_grant = lakeformation.CfnPermissions(
                 self,
                 "AnalystSelectMaskedColumns",
@@ -248,8 +245,8 @@ class GovernanceStack(Stack):
                 permissions=["SELECT"],
             )
 
-        # A grant references the S3 location by ARN; if LF hasn't registered it yet, the grant
-        # can race ahead and fail. Pin the ordering explicitly (CloudFormation can't infer it
-        # from a string database_name, so we make the data dependency a real one).
-        db_describe.add_dependency(curated_location)
-        select_grant.add_dependency(curated_location)
+        # Chain the grants so only one LF permission op is in flight at a time (LF's permission
+        # API is not reliably concurrent -- parallel grants can spuriously fail).
+        db_describe.add_dependency(glue_location_access)
+        if select_grant is not None:
+            select_grant.add_dependency(db_describe)
